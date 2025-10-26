@@ -218,6 +218,6 @@ static int try_main(u8* memory)
 
 void WinMainCRTStartup(void)
 {
-  static u8 memory[1 << 15];
+  ALIGN(8) static u8 memory[1 << 15];
   ExitProcess(try_main(memory));
 }
