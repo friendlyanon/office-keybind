@@ -1,17 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0 */
 
 /*
-printf "%s\n" "LIBRARY ntdll" EXPORTS memcpy wcscmp > keybind.def
+printf "%s\n" "LIBRARY ntdll" EXPORTS memcpy > keybind.def
 dlltool -d keybind.def -l keybind.lib
-gcc -std=c89 -Os -s -fno-asynchronous-unwind-tables -Wl,--gc-sections,--tsaware,--subsystem,windows -nostdlib -fno-builtin -o keybind.exe keybind.c -lkernel32 -luser32 -L. -lkeybind
+gcc -std=c89 -Os -s -fno-asynchronous-unwind-tables -Wl,--gc-sections,--tsaware,--subsystem,windows -nostdlib -fno-builtin -o keybind.exe keybind.c -lkernel32 -luser32 -lrstrtmgr -L. -lkeybind
 rm keybind.def keybind.lib
 */
 /*
-> keybind.def (echo LIBRARY ntdll& echo EXPORTS& echo memcpy& echo wcscmp)
+> keybind.def (echo LIBRARY ntdll& echo EXPORTS& echo memcpy)
 > stub.vbs echo Set M=CreateObject^(^"System.IO.MemoryStream^"^):M.SetLength 64:M.WriteByte 77:M.WriteByte 90:Set S=CreateObject^(^"ADODB.Stream^"^):S.Open:S.Type=1:S.Write M.ToArray^(^):S.SaveToFile WScript.ScriptFullName^&^"\..\stub.bin^",2:S.Close
 cscript //nologo stub.vbs
 lib /nologo /machine:amd64 /def:keybind.def /out:keybind.lib
-cl /nologo /GS- /Gs1000000000 /O2 /Oi keybind.c /link kernel32.lib user32.lib keybind.lib /subsystem:windows /stack:0x200000,200000 /emittoolversioninfo:no /stub:stub.bin /emitpogophaseinfo /nocoffgrpinfo /manifest:no /merge:.edata=.rdata /merge:.pdata=.rdata /emitvolatilemetadata:no /ignore:4060 /safeseh:no
+cl /nologo /GS- /Gs1000000000 /O2 /Oi keybind.c /link kernel32.lib user32.lib rstrtmgr.lib keybind.lib /subsystem:windows /stack:0x200000,200000 /emittoolversioninfo:no /stub:stub.bin /emitpogophaseinfo /nocoffgrpinfo /manifest:no /merge:.edata=.rdata /merge:.pdata=.rdata /emitvolatilemetadata:no /ignore:4060 /safeseh:no
 del keybind.def stub.vbs stub.bin keybind.exp keybind.lib keybind.obj
 */
 
@@ -44,48 +44,17 @@ typedef size_t uz;
 #  define NT(ret) __attribute__((__dllimport__, __cdecl__)) ret
 #endif
 
-struct si
-{
-  int cb;
-  iz a[3];
-  int b[7];
-  int flags;
-  u16 c[2];
-  iz d[4];
-};
-
-struct pi
-{
-  iz process;
-  iz thread;
-  int pid;
-  int tid;
-};
-
-struct pe32
-{
-  int size;
-  int a;
-  int id;
-  iz b;
-  int c[5];
-  u16 file[260];
-};
-
-W32(int) CloseHandle(iz);
-W32(int) CreateProcessW(iz, u16*, iz, iz, int, int, iz, iz, struct si*, struct pi*);
-W32(iz) CreateToolhelp32Snapshot(int, int);
 NORETURN W32(void) ExitProcess(int);
-W32(int) GetLastError(void);
-W32(iz) OpenProcess(int, int, int);
-W32(int) Process32FirstW(iz, struct pe32*);
-W32(int) Process32NextW(iz, struct pe32*);
+W32(int) GetWindowsDirectoryW(u16*, int);
 W32(int) RegisterHotKey(iz, int, int, int);
+W32(int) RmEndSession(int);
+W32(int) RmRegisterResources(int, int, u16 const**, int, iz, int, iz);
+W32(int) RmRestart(int, int, iz);
+W32(int) RmShutdown(int, int, iz);
+W32(int) RmStartSession(int*, int, u16*);
 W32(void) Sleep(int);
-W32(int) TerminateProcess(iz, int);
 W32(int) UnregisterHotKey(iz, int);
 NT(void*) memcpy(void*, void const*, iz);
-NT(int) wcscmp(u16 const*, u16 const*);
 
 #ifdef _MSC_VER
 #  define memcpy(a, b, c) ((void)memcpy((a), (b), (c)))
@@ -99,55 +68,36 @@ static uz iuz(iz x)
 }
 #endif
 
-static int terminate_process(int id)
+ALIGN(2) static u16 const explorer_exe[] = {92, 101, 120, 112, 108, 111, 114, 101, 114, 46, 101, 120, 101, 0};
+
+static int start_session(int* session, u8* memory)
 {
-  iz handle = OpenProcess(1, 0, id);
-  int result;
-  if (handle == 0) {
+  u16* explorer = (u16*)memory;
+  int copied = GetWindowsDirectoryW(explorer, 1 << 15);
+  u16 session_key[33];
+  u16 const* resources[] = {explorer};
+  if (copied == 0) {
     return 1;
   }
 
-  result = TerminateProcess(handle, 0) == 0;
-  CloseHandle(handle);
-  return result;
-}
+  memcpy(explorer + copied, explorer_exe, sizeof(explorer_exe));
 
-ALIGN(2) static u16 const explorer_exe[] = {101, 120, 112, 108, 111, 114, 101, 114, 46, 101, 120, 101, 0};
-
-static int terminate_explorer(u8* memory)
-{
-  iz snap = CreateToolhelp32Snapshot(2, 0);
-  struct pe32* pe;
-  int result = 0;
-  if (snap == -1) {
+  if (RmStartSession(session, 0, session_key) != 0) {
     return 1;
   }
 
-  pe = (struct pe32*)memory;
-  pe->size = sizeof(*pe);
-  if (Process32FirstW(snap, pe) == 0) {
-    result = GetLastError() != 18;
+  if (RmRegisterResources(*session, 1, resources, 0, 0, 0, 0) != 0) {
     goto exit;
   }
 
-  do {
-    if (wcscmp(pe->file, explorer_exe) == 0) {
-      goto found;
-    }
+  if (RmShutdown(*session, 1, 0) != 0) {
+    goto exit;
+  }
 
-    if (Process32NextW(snap, pe) == 0) {
-      result = GetLastError() != 18;
-      break;
-    }
-  } while (1);
+  return 0;
 
 exit:
-  CloseHandle(snap);
-  return result;
-
-found:
-  CloseHandle(snap);
-  return terminate_process(pe->id);
+  return 1 + RmEndSession(*session) != 0;
 }
 
 static int const keys[] = {0, 32, 68, 76, 78, 79, 80, 84, 87, 88, 89};
@@ -165,18 +115,10 @@ static int register_keybinds(void)
   return 0;
 }
 
-static int start_explorer(u8* memory)
+static int restart_explorer(int session)
 {
-  struct si si = {0};
-  struct pi pi;
-  int result;
-  u16* cmdline = (u16*)memory;
-  si.cb = sizeof(si);
-  memcpy(cmdline, explorer_exe, sizeof(explorer_exe));
-  result = CreateProcessW(0, cmdline, 0, 0, 0, 67108872, 0, 0, &si, &pi) == 0;
-  CloseHandle(pi.process);
-  CloseHandle(pi.thread);
-  return result;
+  int result = RmRestart(session, 0, 0);
+  return result + RmEndSession(session) != 0;
 }
 
 static int unregister_keybinds(void)
@@ -202,15 +144,16 @@ static int unregister_keybinds(void)
 
 static int try_main(u8* memory)
 {
+  int session;
   int result;
-  checked(terminate_explorer(memory));
+  checked(start_session(&session, memory));
   result = register_keybinds();
   if (result != 0) {
-    return result + start_explorer(memory);
+    return result + restart_explorer(session);
   }
 
-  Sleep(4000);
-  checked(start_explorer(memory));
+  checked(restart_explorer(session));
+  Sleep(5000);
   return unregister_keybinds();
 }
 
@@ -218,6 +161,6 @@ static int try_main(u8* memory)
 
 void WinMainCRTStartup(void)
 {
-  ALIGN(8) static u8 memory[1 << 15];
+  ALIGN(2) static u8 memory[1 << 15];
   ExitProcess(try_main(memory));
 }
